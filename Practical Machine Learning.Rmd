@@ -1,0 +1,123 @@
+---
+title: "Practical Machine Learning: Prediction of Weightlifting Data"
+author: "Paul Rachapong Chirarattananon"
+date: "2020-05-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Using data from devices such as fitbit and Nike Fuelband, data of body movements were collected when the wearer of the devices were doing barbell lifts with 5 different postures. The goal is to use data from the accelerometers on the devices to predict the manner in which they did the exercise.
+
+## Data Wrangling and Cleaning
+
+First read the data
+```{r, cache = TRUE}
+dat <- read.csv("pml-training.csv")
+```
+Count NA values for each column
+```{r, cache = TRUE}
+nadat<-mapply(is.na,dat)
+sumna <- apply(nadat,2,sum)
+table(sumna)
+```
+There are 93 columns with no NA and 67 columns with 19216 NA rows (out of 19622)
+These NA-dominated columns have to be removed. It is impossible to impute them.
+```{r, cache = TRUE}
+keepind <- which(sumna==0)
+dat<-dat[,keepind]
+rm(nadat, sumna)
+```
+Scanning with table() with some of the rest of the columns finds that there are still columns with 19216 blank values.
+In addition, X, username, window, and time columns are also not needed, as the goal is the predict with accelerometer data. These need to be removed.
+```{r, cache = TRUE}
+dat<-dat[,-1:-7]
+```
+Scanning with table() with some of the rest of the columns finds that there are still columns with 19216 blank values. These columns are all of factor data types, so all factors will be removed, except classe, the outcome variable.
+```{r, cache = TRUE}
+dt <- sapply(dat,is.factor)
+dt <- which(!dt)
+dat <- dat[,c(dt,86)]
+```
+And thus the data is clean, with 53 columns left.
+
+## Preparing Data for Machine Learning
+
+We will first use K-fold cross validation to test a few different models.
+First create the folds, and also split the outcome variable off from the rest of the data.
+```{r, cache = TRUE}
+library(caret)
+part <- createFolds(dat$classe,k=5)
+datclasse <- dat$classe
+dat<- dat[,-53]
+```
+The data also needs to be scaled, so after splitting comes scaling. The partitioned, scaled data will be stored in variable sdat
+```{r, cache = TRUE}
+sdat <- vector(mode="list",length=5)
+for (i in 1:5) {
+  sdat[[i]] <- scale(dat[-part[[i]],])
+}
+```
+
+## Testing Machine Learning Models
+
+After testing the training of a couple of different models, we found that most models, especially ensemble-type or complicated models took unbearably long to run.
+In the end we picked 3 simple models from 3 different model types to test with K-fold cross validation.
+
+Prepare variables to store the models
+```{r, cache = TRUE}
+ldamdl <- vector(mode="list",length=5)
+rpartmdl <- vector(mode="list",length=5)
+sdwdmdl <- vector(mode="list",length=5)
+```
+Also prepare a data frame to store the accuracies of the models
+```{r, cache = TRUE}
+df <- data.frame(matrix(ncol = 5, nrow = 4))
+colnames(df) <- 1:5
+```
+Then loop to train the models, make predictions, and store the accuracies in the prepared table.
+```{r, cache = TRUE}
+for (i in 1:5) {
+  ldamdl[[i]] <- train(sdat[[i]],datclasse[-part[[i]]],method = "lda")
+  rpartmdl[[i]] <- train(sdat[[i]],datclasse[-part[[i]]],method = "rpart")
+  sdwdmdl[[i]] <- train(sdat[[i]],datclasse[-part[[i]]],method = "sdwd")
+  temp <- data.frame(t((t(dat[part[[i]],])-attributes(sdat[[i]])[[3]])/
+                         attributes(sdat[[i]])[[4]]))
+  df[,i] <- c( sum(predict(ldamdl[[i]],temp)==datclasse[part[[i]]]), 
+               sum(predict(rpartmdl[[i]],temp)==datclasse[part[[i]]]),
+               sum(predict(sdwdmdl[[i]],temp)==datclasse[part[[i]]]) ,
+               length(datclasse[part[[i]]]) )
+}
+df$average = apply(df[,1:5],1,sum)
+for (i in 1:6) {
+  df[,i] <- c(df[1:3,i]/df[4,i], df[4,i])
+}
+rownames(df) <- c("lda accuracy","rpart accuracy","sdwd accuracy","total data")
+df
+```
+
+## Final Prediction
+
+It is shown from the table that the discriminant-analysis-type model has the best performance, out performing decision tree and distance weighted discrimination. Therefore we will utilize a more complex model of the same family, Bagged Flexible Discriminant Analysis (bagFDA). In addition, to help with speed of the model, we will perform Principal Component Analysis on the data. Note that we use all the data without splitting because we'll simply validate against the 20 test cases.
+```{r, cache = TRUE}
+sdata <- scale(dat)
+pcamat <- preProcess(sdata, method="pca", thresh=0.9)
+pcadat <- sdata %*% pcamat$rotation
+```
+The bagged FDA can then be performed on the transformed data like so
+```{r, cache = TRUE, message=FALSE, warning=FALSE}
+bagfdamdl <- train(pcadat,datclasse,method="bagFDA", B=5, keepX=FALSE)
+```
+For the purpose of testing the model, one should always test on unseen data, so that the model isn't overfitted. However, while we have a separate test data, we don't have labels of 'classe' for it. For the limited purpose of this brief report, we'll test the final model on training data only.
+
+The accuracy and confusion matrix is like so.
+```{r}
+library(caret)
+print(paste("Accuracy of bagged FDA model on training data is", sum(datclasse == predict(bagfdamdl,pcadat))/length(datclasse) ))
+confusionMatrix(table(predict(bagfdamdl,pcadat), datclasse))$table
+```
+The result is not impressive. The aggregated model performs worse than the much simpler Linear Discriminant Analysis model. The out of sample error is then expected to be even higher. Nevertheless, class A (correct posture), is where the prediction is most sensitive.
